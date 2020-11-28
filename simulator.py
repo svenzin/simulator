@@ -96,7 +96,9 @@ class WidePoint(BasePoint):
         self.IN().set(value_floating(self.width))
 
     def _set_value(self, value):
-        assert self.width == len(value), 'Invalid data width'
+        if value == value_floating():
+            value = value_floating(self.width)
+        assert self.width == len(value), '{}: Invalid data width, expected {}, received {}'.format(self.name, self.width, value)
         super()._set_value(value)
         return self
 
@@ -243,12 +245,18 @@ class Inverter:
 ################################################################################
 
 class Component:
-    def __init__(self):
+    def __init__(self, name=None):
+        if name is None: name = self.__class__.__name__
+        self.name = name
         self.wiring = Wiring()
         self._components = set()
     
-    def _subcomponent(self, cls):
-        component = cls()
+    def _subname(self, name):
+        return self.name + '.' + name
+    
+    def _subcomponent(self, cls, name=None):
+        if name is None: name = cls.__name__
+        component = cls(self._subname(name))
         self._components.add(component)
         return component
 
@@ -268,11 +276,11 @@ class Component:
 ################################################################################
 
 class Boolean(Component):
-    def __init__(self):
-        super().__init__()
-        self.a = Point(self.__class__.__name__+'.A').IN()
-        self.b = Point(self.__class__.__name__+'.B').IN()
-        self.output = Point(self.__class__.__name__+'.Y').OUT(value_floating())
+    def __init__(self, name=None):
+        super().__init__(name)
+        self.a = Point(self._subname('A')).IN()
+        self.b = Point(self._subname('B')).IN()
+        self.output = Point(self._subname('Y')).OUT(value_floating())
         self._truth_table = { input: { input: UNDECIDED for input in [ LOW, HIGH, FLOATING, HI_Z, CONFLICT, UNDECIDED ] } for input in [ LOW, HIGH, FLOATING, HI_Z, CONFLICT, UNDECIDED ] }
 
     def generate(self):
@@ -283,24 +291,24 @@ class Boolean(Component):
         return '<{}> {} {} -> {}'.format(self.__class__.__name__, self.a, self.b, self.output)
 
 class And(Boolean):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None):
+        super().__init__(name)
         self._truth_table[LOW][LOW] = LOW
         self._truth_table[LOW][HIGH] = LOW
         self._truth_table[HIGH][LOW] = LOW
         self._truth_table[HIGH][HIGH] = HIGH
 
 class Xor(Boolean):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None):
+        super().__init__(name)
         self._truth_table[LOW][LOW] = LOW
         self._truth_table[LOW][HIGH] = HIGH
         self._truth_table[HIGH][LOW] = HIGH
         self._truth_table[HIGH][HIGH] = LOW
 
 class Or(Boolean):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None):
+        super().__init__(name)
         self._truth_table[LOW][LOW] = LOW
         self._truth_table[LOW][HIGH] = HIGH
         self._truth_table[HIGH][LOW] = HIGH
@@ -309,18 +317,19 @@ class Or(Boolean):
 ################################################################################
 
 class FixedWidthComponent(Component):
-    def __init__(self, width):
+    def __init__(self, width, name=None):
+        super().__init__(name)
         self.width = width
 
 class Register_173(FixedWidthComponent):
-    def __init__(self, width):
-        super().__init__(width)
-        self.input = WidePoint('input', self.width).IN()
-        self.output = WidePoint('output', self.width).HiZ()
-        self.n_ie = SignalPoint('/ie').IN()
-        self.n_oe = SignalPoint('/oe').IN()
-        self.reset = SignalPoint('reset').IN()
-        self.clock = TriggerPoint('clock').IN()
+    def __init__(self, width, name=None):
+        super().__init__(width, name)
+        self.input = WidePoint(self._subname('input'), self.width).IN()
+        self.output = WidePoint(self._subname('output'), self.width).HiZ()
+        self.n_ie = SignalPoint(self._subname('/ie')).IN()
+        self.n_oe = SignalPoint(self._subname('/oe')).IN()
+        self.reset = SignalPoint(self._subname('reset')).IN()
+        self.clock = TriggerPoint(self._subname('clock')).IN()
     
     def generate(self):
         if not self.n_oe.is_low():
@@ -335,11 +344,11 @@ class Register_173(FixedWidthComponent):
         self.clock.tick()
 
 class Buffer_541(FixedWidthComponent):
-    def __init__(self, width):
-        super().__init__(width)
-        self.n_oe = SignalPoint('/oe').IN()
-        self.input = WidePoint('input', self.width).IN()
-        self.output = WidePoint('output', self.width).HiZ()
+    def __init__(self, width, name=None):
+        super().__init__(width, name)
+        self.n_oe = SignalPoint(self._subname('/oe')).IN()
+        self.input = WidePoint(self._subname('input'), self.width).IN()
+        self.output = WidePoint(self._subname('output'), self.width).HiZ()
     
     def generate(self):
         if self.n_oe.is_low():
@@ -348,16 +357,16 @@ class Buffer_541(FixedWidthComponent):
             self.output.HiZ()
 
 class Counter_161(FixedWidthComponent):
-    def __init__(self, width):
-        super().__init__(width)
-        self.input = WidePoint('input', self.width).IN()
-        self.output = WidePoint('output', self.width).OUT(value_floating(self.width))
-        self.n_reset = SignalPoint('/reset').IN()
-        self.clock = TriggerPoint('clock').IN()
-        self.n_ie = SignalPoint('/ie').IN()
-        self.cep = SignalPoint('cep').IN()
-        self.cet = SignalPoint('cet').IN()
-        self.tc = SignalPoint('tc').OUT(value_floating())
+    def __init__(self, width, name=None):
+        super().__init__(width, name)
+        self.input = WidePoint(self._subname('input'), self.width).IN()
+        self.output = WidePoint(self._subname('output'), self.width).OUT(value_floating(self.width))
+        self.n_reset = SignalPoint(self._subname('/reset')).IN()
+        self.clock = TriggerPoint(self._subname('clock')).IN()
+        self.n_ie = SignalPoint(self._subname('/ie')).IN()
+        self.cep = SignalPoint(self._subname('cep')).IN()
+        self.cet = SignalPoint(self._subname('cet')).IN()
+        self.tc = SignalPoint(self._subname('tc')).OUT(value_floating())
     
     def generate(self):
         self.tc.OUT(value_low())
@@ -379,16 +388,16 @@ class Counter_161(FixedWidthComponent):
         self.clock.tick()
 
 class Counter_193(FixedWidthComponent):
-    def __init__(self, width):
-        super().__init__(width)
-        self.input = WidePoint('input', self.width).IN()
-        self.output = WidePoint('output', self.width).OUT(value_floating(self.width))
-        self.reset = SignalPoint('reset').IN()
-        self.n_ie = SignalPoint('/ie').IN()
-        self.cpu = TriggerPoint('cpu').IN()
-        self.cpd = TriggerPoint('cpd').IN()
-        self.n_tcu = SignalPoint('/tcu').OUT(value_floating())
-        self.n_tcd = SignalPoint('/tcd').OUT(value_floating())
+    def __init__(self, width, name=None):
+        super().__init__(width, name)
+        self.input = WidePoint(self._subname('input'), self.width).IN()
+        self.output = WidePoint(self._subname('output'), self.width).OUT(value_floating(self.width))
+        self.reset = SignalPoint(self._subname('reset')).IN()
+        self.n_ie = SignalPoint(self._subname('/ie')).IN()
+        self.cpu = TriggerPoint(self._subname('cpu')).IN()
+        self.cpd = TriggerPoint(self._subname('cpd')).IN()
+        self.n_tcu = SignalPoint(self._subname('/tcu')).OUT(value_floating())
+        self.n_tcd = SignalPoint(self._subname('/tcd')).OUT(value_floating())
     
     def generate(self):
         if self.reset.is_high():
@@ -433,14 +442,14 @@ class Counter_193(FixedWidthComponent):
 ################################################################################
 
 class HalfAdder(Component):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None):
+        super().__init__(name)
         self._and = self._subcomponent(And)
         self._xor = self._subcomponent(Xor)
-        self.a = Point(self.__class__.__name__+'.A').IN()
-        self.b = Point(self.__class__.__name__+'.B').IN()
-        self.s = Point(self.__class__.__name__+'.S').IN()
-        self.c = Point(self.__class__.__name__+'.C').IN()
+        self.a = Point(self._subname('A')).IN()
+        self.b = Point(self._subname('B')).IN()
+        self.s = Point(self._subname('S')).IN()
+        self.c = Point(self._subname('C')).IN()
         w = self.wiring
         w.connect(self.a, self._xor.a)
         w.connect(self.b, self._xor.b)
@@ -450,16 +459,16 @@ class HalfAdder(Component):
         w.connect(self._and.output, self.c)
 
 class FullAdder(Component):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None):
+        super().__init__(name)
         self._ha1 = self._subcomponent(HalfAdder)
         self._ha2 = self._subcomponent(HalfAdder)
         self._or = self._subcomponent(Or)
-        self.a = Point(self.__class__.__name__+'.a').IN()
-        self.b = Point(self.__class__.__name__+'.b').IN()
-        self.cin = Point(self.__class__.__name__+'.cin').IN()
-        self.s = Point(self.__class__.__name__+'.s').IN()
-        self.cout = Point(self.__class__.__name__+'.cout').IN()
+        self.a = Point(self._subname('a')).IN()
+        self.b = Point(self._subname('b')).IN()
+        self.cin = Point(self._subname('cin')).IN()
+        self.s = Point(self._subname('s')).IN()
+        self.cout = Point(self._subname('cout')).IN()
         w = self.wiring
         w.connect(self.a, self._ha1.a)
         w.connect(self.b, self._ha1.b)
@@ -500,6 +509,7 @@ def propagation(wiring):
         points -= neighbours
         values = [ p.get() for p in neighbours if p.direction == OUT ]
         v = util_resolve_values(values)
+        # print(neighbours, values, v)
         for p in neighbours:
             p.set(v)
 
@@ -653,8 +663,102 @@ def main():
         step(full_adder)
         print(elements)
     
-    plate_0 = Circuit()
-    
+    plate_0 = Circuit('Plate_0')
+    PC = Counter_161(4, 'PC')
+    SP = Counter_193(4, 'SP')
+    MAR = Register_173(4, 'MAR')
+    PC_2_WIDE = Buffer_541(4, 'PC_2_WIDE')
+    SP_2_WIDE = Buffer_541(4, 'SP_2_WIDE')
+    MAR_2_WIDE = Buffer_541(4, 'MAR_2_WIDE')
+    WIDE_2_ADDR = Buffer_541(4, 'WIDE_2_ADDR')
+    plate_0.add(PC)
+    plate_0.add(SP)
+    plate_0.add(MAR)
+    plate_0.add(PC_2_WIDE)
+    plate_0.add(SP_2_WIDE)
+    plate_0.add(MAR_2_WIDE)
+    plate_0.add(WIDE_2_ADDR)
+    plate_0.connect(WIDE_2_ADDR.input, PC.input)
+    plate_0.connect(PC.output, PC_2_WIDE.input)
+    plate_0.connect(PC_2_WIDE.output, WIDE_2_ADDR.input)
+    plate_0.connect(WIDE_2_ADDR.input, SP.input)
+    plate_0.connect(SP.output, SP_2_WIDE.input)
+    plate_0.connect(SP_2_WIDE.output, WIDE_2_ADDR.input)
+    plate_0.connect(WIDE_2_ADDR.input, MAR.input)
+    plate_0.connect(MAR.output, MAR_2_WIDE.input)
+    plate_0.connect(MAR_2_WIDE.output, WIDE_2_ADDR.input)
+    WIDE = WidePoint('WIDE', 4)
+    plate_0.connect(WIDE_2_ADDR.input, WIDE)
+    ADDR = WidePoint('ADDR', 4)
+    plate_0.connect(WIDE_2_ADDR.output, ADDR)
+    MAR_IN = SignalPoint('MAR_IN')
+    MAR_OUT = SignalPoint('MAR_OUT')
+    PC_IN = SignalPoint('PC_IN')
+    PC_OUT = SignalPoint('PC_OUT')
+    SP_IN = SignalPoint('SP_IN')
+    SP_OUT = SignalPoint('SP_OUT')
+    WIDE_OUT = SignalPoint('WIDE_OUT')
+    CLOCK = SignalPoint('CLOCK')
+    PC.n_reset.set(value_high())
+    plate_0.connect(CLOCK, PC.clock)
+    plate_0.connect(PC_IN, PC.n_ie)
+    PC.cep.set(value_low())
+    PC.cet.set(value_low())
+    SP.reset.set(value_low())
+    plate_0.connect(SP_IN, SP.n_ie)
+    SP.cpu.set(value_low())
+    SP.cpd.set(value_low())
+    plate_0.connect(MAR_IN, MAR.n_ie)
+    MAR.n_oe.set(value_low())
+    MAR.reset.set(value_low())
+    plate_0.connect(CLOCK, MAR.clock)
+    plate_0.connect(PC_OUT, PC_2_WIDE.n_oe)
+    plate_0.connect(SP_OUT, SP_2_WIDE.n_oe)
+    plate_0.connect(MAR_OUT, MAR_2_WIDE.n_oe)
+    plate_0.connect(WIDE_OUT, WIDE_2_ADDR.n_oe)
+    elements = [ PC.output, SP.output, MAR.output, WIDE, ADDR ]
+    print(elements)
+
+    def setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, xCLOCK):
+        MAR_IN.OUT(value(xMAR_IN))
+        MAR_OUT.OUT(value(xMAR_OUT))
+        PC_IN.OUT(value(xPC_IN))
+        PC_OUT.OUT(value(xPC_OUT))
+        SP_IN.OUT(value(xSP_IN))
+        SP_OUT.OUT(value(xSP_OUT))
+        WIDE_OUT.OUT(value(xWIDE_OUT))
+        CLOCK.OUT(value(xCLOCK))
+    # 0101 > MAR
+    print()
+    WIDE.OUT(value(0, 1, 0, 1))
+    setup(0, 1, 1, 1, 1, 1, 1, 0)
+    step(plate_0)
+    setup(0, 1, 1, 1, 1, 1, 1, 1)
+    step(plate_0)
+    print(elements)
+    # 1111 > PC, SP
+    print()
+    WIDE.OUT(value(1, 1, 1, 1))
+    setup(1, 1, 0, 1, 0, 1, 1, 0)
+    step(plate_0)
+    setup(1, 1, 0, 1, 0, 1, 1, 1)
+    step(plate_0)
+    print(elements)
+    # MAR > PC, ADDR
+    print()
+    WIDE.IN()
+    setup(1, 0, 0, 1, 1, 1, 0, 0)
+    step(plate_0)
+    setup(1, 0, 0, 1, 1, 1, 0, 1)
+    step(plate_0)
+    print(elements)
+    # SP > ADDR
+    print()
+    setup(1, 1, 1, 1, 1, 0, 0, 0)
+    step(plate_0)
+    setup(1, 1, 1, 1, 1, 0, 0, 1)
+    step(plate_0)
+    print(elements)
 
 
 ################################################################################
@@ -1264,6 +1368,6 @@ class Test_Counter_193(unittest.TestCase):
                             self.assertTrue(counter.n_tcd.is_high())
 
 if __name__ == "__main__":
-    unittest.main()
+    # unittest.main()
     main()
 
