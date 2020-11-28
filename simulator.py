@@ -2,6 +2,8 @@ from collections import namedtuple
 from collections import defaultdict
 import itertools
 
+FULL_TESTS = True
+
 elements = set()
 
 IN = 'in'
@@ -38,6 +40,16 @@ def value_conflict(width = 1):
 
 def value_undecided(width = 1):
     return [ UNDECIDED ] * width
+
+def value_to_int(value):
+    n = ''.join([ str(x) for x in value ])
+    return int(n, base=2)
+
+def int_to_value(n, width):
+    n = n % 2**width
+    n = '{:04b}'.format(n)
+    n = [ int(x) for x in n ]
+    return value(*n)
 
 class BasePoint:
     def __init__(self, name):
@@ -106,14 +118,28 @@ class TriggerPoint(SignalPoint):
     def __init__(self, name):
         super().__init__(name)
         self._was_low = False
-    
-    def _set_value(self, value):
+
+    def tick(self):
         self._was_low = self.is_low()
-        super()._set_value(value)
         return self
     
     def triggered(self):
         return self._was_low and self.is_high()
+    
+    LOW = 'LOW'
+    HIGH = 'HIGH'
+    TRIGGERED = 'TRIGGERED'
+    def _test_set(self, state):
+        if state == TriggerPoint.LOW:
+            self._set_value(value_low())
+        elif state == TriggerPoint.HIGH:
+            self._set_value(value_high())
+        elif state == TriggerPoint.TRIGGERED:
+            self._was_low = True
+            self._set_value(value_high())
+        else:
+            raise ValueError('state')
+        return self
 
 class Wiring:
     def __init__(self):
@@ -297,14 +323,16 @@ class Register_173(FixedWidthComponent):
         self.clock = TriggerPoint('clock').IN()
     
     def generate(self):
-        if self.n_ie.is_low():
-            if self.clock.triggered():
-                self.output.OUT(self.input.get())
-        if self.reset.is_high():
-            self.output.OUT(value_low(self.width))
         if not self.n_oe.is_low():
             self.output.HiZ()
-        self._clock0 = self.clock.get()
+        else:
+            if self.reset.is_high():
+                self.output.OUT(value_low(self.width))
+            else:
+                if self.n_ie.is_low():
+                    if self.clock.triggered():
+                        self.output.OUT(self.input.get())
+        self.clock.tick()
 
 class Buffer_541(FixedWidthComponent):
     def __init__(self, width):
@@ -325,14 +353,82 @@ class Counter_161(FixedWidthComponent):
         self.input = WidePoint('input', self.width).IN()
         self.output = WidePoint('output', self.width).OUT(value_floating(self.width))
         self.n_reset = SignalPoint('/reset').IN()
-        self.clock = SignalPoint('clock').IN()
+        self.clock = TriggerPoint('clock').IN()
         self.n_ie = SignalPoint('/ie').IN()
         self.cep = SignalPoint('cep').IN()
         self.cet = SignalPoint('cet').IN()
         self.tc = SignalPoint('tc').OUT(value_floating())
     
     def generate(self):
-        pass
+        self.tc.OUT(value_low())
+        if self.n_reset.is_low():
+            self.output.OUT(value_low(4))
+        else:
+            if self.n_ie.is_low():
+                if self.clock.triggered():
+                    self.output.OUT(self.input.get())
+            else:
+                if self.cep.is_high() and self.cet.is_high():
+                    if self.clock.triggered():
+                        n = value_to_int(self.output.get())
+                        n += 1
+                        n = int_to_value(n, self.width)
+                        self.output.OUT(n)
+            if self.output.get() == value_high(self.width):
+                self.tc.OUT(self.cet.get())
+        self.clock.tick()
+
+class Counter_193(FixedWidthComponent):
+    def __init__(self, width):
+        super().__init__(width)
+        self.input = WidePoint('input', self.width).IN()
+        self.output = WidePoint('output', self.width).OUT(value_floating(self.width))
+        self.reset = SignalPoint('reset').IN()
+        self.n_ie = SignalPoint('/ie').IN()
+        self.cpu = TriggerPoint('cpu').IN()
+        self.cpd = TriggerPoint('cpd').IN()
+        self.n_tcu = SignalPoint('/tcu').OUT(value_floating())
+        self.n_tcd = SignalPoint('/tcd').OUT(value_floating())
+    
+    def generate(self):
+        if self.reset.is_high():
+            # Reset
+            self.output.OUT(value_low(self.width))
+            self.n_tcu.OUT(value_high())
+            self.n_tcd.OUT(self.cpd.get())
+        else:
+            if self.n_ie.is_low():
+                # Load
+                self.output.OUT(self.input.get())
+                self.n_tcu.OUT(value_high())
+                self.n_tcd.OUT(value_high())
+                if self.output.get() == value_low(self.width):
+                    self.n_tcd.OUT(self.cpd.get())
+                if self.output.get() == value_high(self.width):
+                    self.n_tcu.OUT(self.cpu.get())
+            else:
+                self.n_tcu.OUT(value_high())
+                self.n_tcd.OUT(value_high())
+                if self.cpu.triggered() and self.cpd.is_high():
+                    # Count up
+                    n = value_to_int(self.output.get())
+                    n += 1
+                    n = int_to_value(n, self.width)
+                    self.output.OUT(n)
+                elif self.cpu.is_high() and self.cpd.triggered():
+                    # Count down
+                    n = value_to_int(self.output.get())
+                    n -= 1
+                    n = int_to_value(n, self.width)
+                    self.output.OUT(n)
+                else:
+                    # Hold
+                    if self.output.get() == value_low(self.width):
+                        self.n_tcd.OUT(self.cpd.get())
+                    if self.output.get() == value_high(self.width):
+                        self.n_tcu.OUT(self.cpu.get())
+        self.cpu.tick()
+        self.cpd.tick()
 
 ################################################################################
 
@@ -556,11 +652,23 @@ def main():
         cin.OUT(vc)
         step(full_adder)
         print(elements)
+    
+    plate_0 = Circuit()
+    
 
 
 ################################################################################
 
 import unittest
+
+def test_signals():
+    return [ value_low(), value_high() ]
+
+def test_clocks():
+    return [ TriggerPoint.LOW, TriggerPoint.HIGH, TriggerPoint.TRIGGERED ]
+
+def test_inputs(width):
+    return [ value(*x) for x in itertools.product([LO, HI], repeat=width) ]
 
 class PointTests(unittest.TestCase):
     def test_set_value(self):
@@ -706,6 +814,62 @@ class Test_Register_173(unittest.TestCase):
         reg.n_oe.set(value_high())
         reg.generate()
         self.assertEqual(reg.output.get(), value_hi_z(4))
+    
+    def test_full_173(self):
+        def make(input, n_ie, n_oe, reset, clock):
+            width = len(input)
+            register = Register_173(width)
+            register.input.set(input)
+            register.n_ie.set(n_ie)
+            register.n_oe.set(n_oe)
+            register.reset.set(reset)
+            register.clock._test_set(clock)
+            return register
+        
+        if not FULL_TESTS: return
+        width = 4
+        # Output enabled
+        n_oe = value_high()
+        for input in test_inputs(width):
+            for n_ie in test_signals():
+                for reset in test_signals():
+                    for clock in test_clocks():
+                        register = make(input, n_ie, n_oe, reset, clock)
+                        register.generate()
+                        self.assertEqual(register.output.get(), value_hi_z(width))
+        # Reset
+        n_oe = value_low()
+        reset = value_high()
+        for input in test_inputs(width):
+            for n_ie in test_signals():
+                for clock in test_clocks():
+                    register = make(input, n_ie, n_oe, reset, clock)
+                    register.generate()
+                    self.assertEqual(register.output.get(), value_low(width))
+        # Load
+        n_oe = value_low()
+        reset = value_low()
+        n_ie = value_low()
+        for input in test_inputs(width):
+            for clock in [ TriggerPoint.LOW, TriggerPoint.HIGH ]:
+                register = make(input, n_ie, n_oe, reset, clock)
+                x0 = register.output.get()
+                register.generate()
+                self.assertEqual(register.output.get(), x0)
+            for clock in [ TriggerPoint.TRIGGERED ]:
+                register = make(input, n_ie, n_oe, reset, clock)
+                register.generate()
+                self.assertEqual(register.output.get(), input)
+        # Hold
+        n_oe = value_low()
+        reset = value_low()
+        n_ie = value_high()
+        for input in test_inputs(width):
+            for clock in test_clocks():
+                register = make(input, n_ie, n_oe, reset, clock)
+                x0 = register.output.get()
+                register.generate()
+                self.assertEqual(register.output.get(), x0)
 
 class Test_Buffer_541(unittest.TestCase):
     def test_541(self):
@@ -725,20 +889,379 @@ class Test_Buffer_541(unittest.TestCase):
         buf.n_oe.set(value_high())
         buf.generate()
         self.assertEqual(buf.output.get(), value_hi_z(4))
+    
+    def test_full_541(self):
+        def make(input, n_oe):
+            width = len(input)
+            buffer = Buffer_541(width)
+            buffer.input.set(input)
+            buffer.n_oe.set(n_oe)
+            return buffer
+        
+        if not FULL_TESTS: return
+        width = 4
+        # Output enabled
+        for input in test_inputs(width):
+            buffer = make(input, value_low())
+            buffer.generate()
+            self.assertEqual(buffer.output.get(), input)
+        # Output disabled
+        for input in test_inputs(width):
+            buffer = make(input, value_high())
+            buffer.generate()
+            self.assertEqual(buffer.output.get(), value_hi_z(width))
+
 
 class Test_Counter_161(unittest.TestCase):
     def test_161(self):
+        def counter():
+            cnt = Counter_161(4)
+            cnt.n_reset.set(value_high())
+            cnt.clock.set(value_low())
+            cnt.cep.set(value_low())
+            cnt.cet.set(value_low())
+            cnt.n_ie.set(value_high())
+            return cnt
+        def clock(counter):
+            counter.clock.set(value_low())
+            counter.generate()
+            counter.clock.set(value_high())
+            counter.generate()
         # Load on clock
         # Load 0101
+        cnt = counter()
+        x0 = cnt.output.get()
+        assert x0 == value_floating(4)
+        x = value(LO, HI, LO, HI)
+        cnt.input.set(x)
+        cnt.n_ie.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), x0)
+        cnt.clock.set(value_high())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), x)
         # Load 1010
+        cnt = counter()
+        x = value(HI, LO, HI, LO)
+        cnt.input.set(x)
+        cnt.n_ie.set(value_low())
+        clock(cnt)
+        self.assertEqual(cnt.output.get(), x)
         # Reset
+        cnt = counter()
+        cnt.n_reset.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value_low(4))
+        # Load 1111, CET 0 => TC 0
+        cnt = counter()
+        cnt.input.set(value_high(4))
+        cnt.n_ie.set(value_low())
+        clock(cnt)
+        self.assertTrue(cnt.tc.is_low())
         # Load 1111, CET 1 => TC 1
-        # Load 1100, count, 1111 & CET 1 => TC 1
-        # Count, loop to 0000
-        # Load 1110, hold CET 0 => TC 0, hold CEP 0 => TC 0
-        # Count, hold CET 0, hold CEP 0 => TC 1
-        pass
+        cnt = counter()
+        cnt.input.set(value_high(4))
+        cnt.n_ie.set(value_low())
+        cnt.cet.set(value_high())
+        clock(cnt)
+        self.assertTrue(cnt.tc.is_high())
+        # Load 1110, count, 1111 => TC 1, loop to 0
+        cnt = counter()
+        cnt.input.set(value(HI, HI, HI, LO))
+        cnt.n_ie.set(value_low())
+        clock(cnt)
+        cnt.n_ie.set(value_high())
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
+        self.assertTrue(cnt.tc.is_low())
+        cnt.cep.set(value_high())
+        cnt.cet.set(value_high())
+        clock(cnt)
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
+        self.assertTrue(cnt.tc.is_high())
+        clock(cnt)
+        self.assertEqual(cnt.output.get(), value(LO, LO, LO, LO))
+        self.assertTrue(cnt.tc.is_low())
+        # Hold 1110, hold CET 0, CEP 1 => TC 0, hold CET 1, CEP 0 => TC 0
+        cnt = counter()
+        cnt.input.set(value(HI, HI, HI, LO))
+        cnt.n_ie.set(value_low())
+        clock(cnt)
+        cnt.n_ie.set(value_high())
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
+        cnt.cep.set(value_low())
+        cnt.cet.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
+        self.assertTrue(cnt.tc.is_low())
+        cnt.cep.set(value_high())
+        cnt.cet.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
+        self.assertTrue(cnt.tc.is_low())
+        cnt.cep.set(value_low())
+        cnt.cet.set(value_high())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
+        self.assertTrue(cnt.tc.is_low())
+        # Hold 1111, hold CET 0, CEP 1 => TC 0, hold CET 1, CEP 0 => TC 0
+        cnt = counter()
+        cnt.input.set(value(HI, HI, HI, HI))
+        cnt.n_ie.set(value_low())
+        clock(cnt)
+        cnt.n_ie.set(value_high())
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
+        cnt.cep.set(value_low())
+        cnt.cet.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
+        self.assertTrue(cnt.tc.is_low())
+        cnt.cep.set(value_high())
+        cnt.cet.set(value_low())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
+        self.assertTrue(cnt.tc.is_low())
+        cnt.cep.set(value_low())
+        cnt.cet.set(value_high())
+        cnt.generate()
+        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
+        self.assertTrue(cnt.tc.is_high())
+    
+    def test_full_161(self):
+        def set(counter, n_ie, n_reset, cep, cet, clock):
+            counter.n_ie.set(n_ie)
+            counter.n_reset.set(n_reset)
+            counter.cep.set(cep)
+            counter.cet.set(cet)
+            counter.clock._test_set(clock)
+            return counter
+        
+        def make(input, n_ie, n_reset, cep, cet, clock):
+            width = len(input)
+            counter = Counter_161(width)
+            counter.input.set(input)
+            return set(counter, n_ie, n_reset, cep, cet, clock)
 
+        if not FULL_TESTS: return
+        width = 4
+        # Reset
+        n_reset = value_low()
+        for input in test_inputs(width):
+            for n_ie in test_signals():
+                for cep in test_signals():
+                    for cet in test_signals():
+                        for clock in test_clocks():
+                            counter = make(input, n_ie, n_reset, cep, cet, clock)
+                            counter.generate()
+                            self.assertEqual(counter.output.get(), value_low(4))
+                            self.assertTrue(counter.tc.is_low())
+        # Load
+        n_reset = value_high()
+        n_ie = value_low()
+        clock = TriggerPoint.TRIGGERED
+        for input in test_inputs(width):
+            for cep in test_signals():
+                for cet in test_signals():
+                    counter = make(input, n_ie, n_reset, cep, cet, clock)
+                    counter.generate()
+                    self.assertEqual(counter.output.get(), input)
+                    if input == value_high(width) and cet == value_high():
+                        self.assertTrue(counter.tc.is_high())
+                    else:
+                        self.assertTrue(counter.tc.is_low())
+        def load(input, n_ie, n_reset, cep, cet, clock):
+            counter = make(input, value_low(), value_high(), value_low(), value_low(), TriggerPoint.TRIGGERED)
+            counter.generate()
+            return set(counter, n_ie, n_reset, cep, cet, clock)
+        # Hold, not 1111
+        x0 = value_floating(width)
+        n_reset = value_high()
+        n_ie = value_high()
+        for input in test_inputs(width):
+            for cep in test_signals():
+                for cet in test_signals():
+                    if cep == value_high() and cet == value_high():
+                        continue
+                    for clock in test_clocks():
+                        counter = load(x0, n_ie, n_reset, cep, cet, clock)
+                        counter.input.set(input)
+                        counter.generate()
+                        self.assertEqual(counter.output.get(), x0)
+                        self.assertTrue(counter.tc.is_low())
+        # Hold 1111
+        x0 = value_high(width)
+        n_reset = value_high()
+        n_ie = value_high()
+        for input in test_inputs(width):
+            for cep in test_signals():
+                for cet in test_signals():
+                    if cep == value_high() and cet == value_high():
+                        continue
+                    for clock in test_clocks():
+                        counter = load(x0, n_ie, n_reset, cep, cet, clock)
+                        counter.input.set(input)
+                        counter.generate()
+                        self.assertEqual(counter.output.get(), x0)
+                        if cet == value_high():
+                            self.assertTrue(counter.tc.is_high())
+                        else:
+                            self.assertTrue(counter.tc.is_low())
+        # Count
+        n_reset = value_high()
+        n_ie = value_high()
+        inputs = test_inputs(width)
+        incremented = inputs[1:] + [ inputs[0] ]
+        for input, count in zip(inputs, incremented):
+            for cep in test_signals():
+                for cet in test_signals():
+                    for clock in [ TriggerPoint.TRIGGERED ]:
+                        if cep == value_high() and cet == value_high():
+                            counter = load(input, n_ie, n_reset, cep, cet, clock)
+                            counter.generate()
+                            self.assertEqual(counter.output.get(), count)
+                            if count == value_high(width) and cet == value_high():
+                                self.assertTrue(counter.tc.is_high())
+                            else:
+                                self.assertTrue(counter.tc.is_low())
+                    for clock in [ TriggerPoint.LOW, TriggerPoint.HIGH ]:
+                        if cep == value_high() and cet == value_high():
+                            counter = load(input, n_ie, n_reset, cep, cet, clock)
+                            counter.generate()
+                            self.assertEqual(counter.output.get(), input)
+                            if input == value_high(width) and cet == value_high():
+                                self.assertTrue(counter.tc.is_high())
+                            else:
+                                self.assertTrue(counter.tc.is_low())
+
+class Test_Counter_193(unittest.TestCase):
+    def test_full_193(self):
+        def setup(counter, n_ie, reset, cpu, cpd):
+            counter.n_ie.set(n_ie)
+            counter.reset.set(reset)
+            counter.cpu._test_set(cpu)
+            counter.cpd._test_set(cpd)
+            return counter
+
+        def make(input, n_ie, reset, cpu, cpd):
+            width = len(input)
+            counter = Counter_193(width)
+            counter.input.set(input)
+            return setup(counter, n_ie, reset, cpu, cpd)
+        
+        if not FULL_TESTS: return
+        width = 4
+        # Reset, CPD 0
+        reset = value_high()
+        cpd = TriggerPoint.LOW
+        for input in test_inputs(width):
+            for n_ie in test_signals():
+                for cpu in test_clocks():
+                    counter = make(input, n_ie, reset, cpu, cpd)
+                    counter.generate()
+                    self.assertEqual(counter.output.get(), value_low(width))
+                    self.assertTrue(counter.n_tcu.is_high())
+                    self.assertTrue(counter.n_tcd.is_low())
+        # Reset, CPD 1
+        reset = value_high()
+        cpd = TriggerPoint.HIGH
+        for input in test_inputs(width):
+            for n_ie in test_signals():
+                for cpu in test_clocks():
+                    counter = make(input, n_ie, reset, cpu, cpd)
+                    counter.generate()
+                    self.assertEqual(counter.output.get(), value_low(width))
+                    self.assertTrue(counter.n_tcu.is_high())
+                    self.assertTrue(counter.n_tcd.is_high())
+        # Load, not 0000, not 1111
+        reset = value_low()
+        n_ie = value_low()
+        for input in test_inputs(width)[1:-1]: # skip 0000, 1111
+            for cpu in test_clocks():
+                for cpd in test_clocks():
+                    counter = make(input, n_ie, reset, cpu, cpd)
+                    counter.generate()
+                    self.assertEqual(counter.output.get(), input)
+                    self.assertTrue(counter.n_tcu.is_high())
+                    self.assertTrue(counter.n_tcd.is_high())
+        # Load 0000
+        reset = value_low()
+        n_ie = value_low()
+        input = value_low(width)
+        cpd = TriggerPoint.LOW
+        for cpu in test_clocks():
+            counter = make(input, n_ie, reset, cpu, cpd)
+            counter.generate()
+            self.assertEqual(counter.output.get(), input)
+            self.assertTrue(counter.n_tcu.is_high())
+            self.assertTrue(counter.n_tcd.is_low())
+        cpd = TriggerPoint.HIGH
+        for cpu in test_clocks():
+            counter = make(input, n_ie, reset, cpu, cpd)
+            counter.generate()
+            self.assertEqual(counter.output.get(), input)
+            self.assertTrue(counter.n_tcu.is_high())
+            self.assertTrue(counter.n_tcd.is_high())
+        # Load 1111
+        reset = value_low()
+        n_ie = value_low()
+        input = value_high(width)
+        cpu = TriggerPoint.LOW
+        for cpd in test_clocks():
+            counter = make(input, n_ie, reset, cpu, cpd)
+            counter.generate()
+            self.assertEqual(counter.output.get(), input)
+            self.assertTrue(counter.n_tcu.is_low())
+            self.assertTrue(counter.n_tcd.is_high())
+        cpu = TriggerPoint.HIGH
+        for cpd in test_clocks():
+            counter = make(input, n_ie, reset, cpu, cpd)
+            counter.generate()
+            self.assertEqual(counter.output.get(), input)
+            self.assertTrue(counter.n_tcu.is_high())
+            self.assertTrue(counter.n_tcd.is_high())
+        
+        def load(input, n_ie, reset, cpu, cpd):
+            counter = make(input, value_low(), value_low(), TriggerPoint.HIGH, TriggerPoint.HIGH)
+            counter.generate()
+            return setup(counter, n_ie, reset, cpu, cpd)
+        # Counting
+        reset = value_low()
+        n_ie = value_high()
+        inputs = test_inputs(width)
+        increments = inputs[1:] + [ inputs[0] ]
+        decrements = [ inputs[-1] ] + inputs[:-1]
+        for input, count_up, count_down in zip(inputs, increments, decrements):
+            for cpu in test_clocks():
+                for cpd in test_clocks():
+                    if cpu == TriggerPoint.TRIGGERED and not cpd == TriggerPoint.LOW:
+                        # Count up
+                        counter = load(input, n_ie, reset, cpu, cpd)
+                        counter.generate()
+                        self.assertEqual(counter.output.get(), count_up)
+                        self.assertTrue(counter.n_tcu.is_high())
+                        self.assertTrue(counter.n_tcd.is_high())
+                    elif not cpu == TriggerPoint.LOW and cpd == TriggerPoint.TRIGGERED:
+                        # Count down
+                        counter = load(input, n_ie, reset, cpu, cpd)
+                        counter.generate()
+                        self.assertEqual(counter.output.get(), count_down)
+                        self.assertTrue(counter.n_tcu.is_high())
+                        self.assertTrue(counter.n_tcd.is_high())
+                    else:
+                        # Hold
+                        counter = load(input, n_ie, reset, cpu, cpd)
+                        counter.input.set(value_floating(width))
+                        counter.generate()
+                        self.assertEqual(counter.output.get(), input)
+                        if input == value_high(width):
+                            if cpu == TriggerPoint.LOW:
+                                self.assertTrue(counter.n_tcu.is_low())
+                        else:
+                            self.assertTrue(counter.n_tcu.is_high())
+                        if input == value_low(width):
+                            if cpd == TriggerPoint.LOW:
+                                self.assertTrue(counter.n_tcd.is_low())
+                        else:
+                            self.assertTrue(counter.n_tcd.is_high())
 
 if __name__ == "__main__":
     unittest.main()
