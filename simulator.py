@@ -78,7 +78,8 @@ class BasePoint:
         return self
     
     def __repr__(self):
-        return '<{}> {} {}'.format(self.name, self.direction, self.value)
+        value = ''.join(( str(x) for x in self.value ))
+        return '<{}> {} {}'.format(self.name, self.direction, value)
 
 class Point(BasePoint):
     def __init__(self, name):
@@ -439,6 +440,32 @@ class Counter_193(FixedWidthComponent):
         self.cpu.tick()
         self.cpd.tick()
 
+class Decoder_139(Component):
+    def __init__(self, name=None):
+        super().__init__(name)
+        self.input = WidePoint(self._subname('input'), 2).IN()
+        self.output_0 = SignalPoint(self._subname('output_0')).OUT(value_floating())
+        self.output_1 = SignalPoint(self._subname('output_1')).OUT(value_floating())
+        self.output_2 = SignalPoint(self._subname('output_2')).OUT(value_floating())
+        self.output_3 = SignalPoint(self._subname('output_3')).OUT(value_floating())
+        self.n_ie = SignalPoint(self._subname('n_ie')).IN()
+    
+    def generate(self):
+        self.output_0.OUT(value_high())
+        self.output_1.OUT(value_high())
+        self.output_2.OUT(value_high())
+        self.output_3.OUT(value_high())
+        if self.n_ie.is_low():
+            n = value_to_int(self.input.get())
+            if n == 0:
+                self.output_0.OUT(value_low())
+            elif n == 1:
+                self.output_1.OUT(value_low())
+            elif n == 2:
+                self.output_2.OUT(value_low())
+            elif n == 3:
+                self.output_3.OUT(value_low())
+
 ################################################################################
 
 class HalfAdder(Component):
@@ -478,6 +505,47 @@ class FullAdder(Component):
         w.connect(self._ha1.c, self._or.a)
         w.connect(self._ha2.c, self._or.b)
         w.connect(self._or.output, self.cout)
+
+################################################################################
+
+def nop(): pass
+
+class HookPoint(WidePoint):
+    def __init__(self, name, width, callback):
+        self.callback = nop
+        super().__init__(name, width)
+        self.callback = callback
+    
+    def set(self, value):
+        super().set(value)
+        if (set(value) & { LOW, HIGH }) == set(value):
+            self.callback()
+        return self
+
+class Splitter(Component):
+    def __init__(self, *widths):
+        wide_width = sum(widths)
+        self.narrows = [ HookPoint('', width, self.narrow_2_wide) for width in widths ]
+        self.wide = HookPoint('', wide_width, self.wide_to_narrow)
+    
+    def narrow_2_wide(self):
+        wide_value = []
+        for narrow in self.narrows:
+            wide_value += narrow.value
+        self.wide.OUT(wide_value)
+
+    def wide_to_narrow(self):
+        wide_value = self.wide.get()
+        i = 0
+        for narrow in self.narrows:
+            narrow.OUT(wide_value[i:i + narrow.width])
+            i += narrow.width
+    
+    def generate(self):
+        print('Splitter')
+        for narrow in self.narrows:
+            narrow.IN()
+        self.wide.IN()
 
 ################################################################################
 
@@ -663,35 +731,19 @@ def main():
         step(full_adder)
         print(elements)
     
-    plate_0 = Circuit('Plate_0')
-    PC = Counter_161(4, 'PC')
-    SP = Counter_193(4, 'SP')
-    MAR = Register_173(4, 'MAR')
-    PC_2_WIDE = Buffer_541(4, 'PC_2_WIDE')
-    SP_2_WIDE = Buffer_541(4, 'SP_2_WIDE')
-    MAR_2_WIDE = Buffer_541(4, 'MAR_2_WIDE')
-    WIDE_2_ADDR = Buffer_541(4, 'WIDE_2_ADDR')
-    plate_0.add(PC)
-    plate_0.add(SP)
-    plate_0.add(MAR)
-    plate_0.add(PC_2_WIDE)
-    plate_0.add(SP_2_WIDE)
-    plate_0.add(MAR_2_WIDE)
-    plate_0.add(WIDE_2_ADDR)
-    plate_0.connect(WIDE_2_ADDR.input, PC.input)
-    plate_0.connect(PC.output, PC_2_WIDE.input)
-    plate_0.connect(PC_2_WIDE.output, WIDE_2_ADDR.input)
-    plate_0.connect(WIDE_2_ADDR.input, SP.input)
-    plate_0.connect(SP.output, SP_2_WIDE.input)
-    plate_0.connect(SP_2_WIDE.output, WIDE_2_ADDR.input)
-    plate_0.connect(WIDE_2_ADDR.input, MAR.input)
-    plate_0.connect(MAR.output, MAR_2_WIDE.input)
-    plate_0.connect(MAR_2_WIDE.output, WIDE_2_ADDR.input)
-    WIDE = WidePoint('WIDE', 4)
-    plate_0.connect(WIDE_2_ADDR.input, WIDE)
-    ADDR = WidePoint('ADDR', 4)
-    plate_0.connect(WIDE_2_ADDR.output, ADDR)
-    MAR_IN = SignalPoint('MAR_IN')
+    # Basic
+    ONE = SignalPoint('ONE').OUT(value_high())
+    ZERO = SignalPoint('ZERO').OUT(value_low())
+    # Buses
+    ALU = WidePoint('ALU', 2)
+    WIDE = WidePoint('WIDE', 6)
+    ADDR = WidePoint('ADDR', 6)
+    # Points of interest
+    PC = WidePoint('PC', 6)
+    SP = WidePoint('SP', 6)
+    MAR = WidePoint('MAR', 6)
+    # Control
+    MAR_IN = WidePoint('MAR_IN', 2)
     MAR_OUT = SignalPoint('MAR_OUT')
     PC_IN = SignalPoint('PC_IN')
     PC_OUT = SignalPoint('PC_OUT')
@@ -699,28 +751,103 @@ def main():
     SP_OUT = SignalPoint('SP_OUT')
     WIDE_OUT = SignalPoint('WIDE_OUT')
     CLOCK = SignalPoint('CLOCK')
-    PC.n_reset.set(value_high())
-    plate_0.connect(CLOCK, PC.clock)
-    plate_0.connect(PC_IN, PC.n_ie)
-    PC.cep.set(value_low())
-    PC.cet.set(value_low())
-    SP.reset.set(value_low())
-    plate_0.connect(SP_IN, SP.n_ie)
-    SP.cpu.set(value_low())
-    SP.cpd.set(value_low())
-    plate_0.connect(MAR_IN, MAR.n_ie)
-    MAR.n_oe.set(value_low())
-    MAR.reset.set(value_low())
-    plate_0.connect(CLOCK, MAR.clock)
-    plate_0.connect(PC_OUT, PC_2_WIDE.n_oe)
-    plate_0.connect(SP_OUT, SP_2_WIDE.n_oe)
-    plate_0.connect(MAR_OUT, MAR_2_WIDE.n_oe)
-    plate_0.connect(WIDE_OUT, WIDE_2_ADDR.n_oe)
-    elements = [ PC.output, SP.output, MAR.output, WIDE, ADDR ]
+    # Plate
+    plate_0 = Circuit('Plate_0')
+    PC_IC = Counter_161(6, 'PC')
+    SP_IC = Counter_193(6, 'SP')
+    MAR0 = Register_173(2, 'MAR0')
+    MAR1 = Register_173(2, 'MAR1')
+    MAR2 = Register_173(2, 'MAR2')
+    MAR_IN_DECODER = Decoder_139('MAR_IN_DECODER')
+    MAR012_2_MAR = Splitter(2, 2, 2)
+    PC_2_WIDE = Buffer_541(6, 'PC_2_WIDE')
+    SP_2_WIDE = Buffer_541(6, 'SP_2_WIDE')
+    MAR_2_WIDE = Buffer_541(6, 'MAR_2_WIDE')
+    WIDE_2_ADDR = Buffer_541(6, 'WIDE_2_ADDR')
+    plate_0.add(PC_IC)
+    plate_0.add(SP_IC)
+    plate_0.add(MAR0)
+    plate_0.add(MAR1)
+    plate_0.add(MAR2)
+    plate_0.add(MAR_IN_DECODER)
+    plate_0.add(PC_2_WIDE)
+    plate_0.add(SP_2_WIDE)
+    plate_0.add(MAR_2_WIDE)
+    plate_0.add(WIDE_2_ADDR)
+    # PC
+    plate_0.connect(PC_IC.input, WIDE)
+    plate_0.connect(PC_IC.output, PC)
+    plate_0.connect(PC_IC.n_reset, ONE)
+    plate_0.connect(PC_IC.clock, CLOCK)
+    plate_0.connect(PC_IC.n_ie, PC_IN)
+    plate_0.connect(PC_IC.cep, ZERO)
+    plate_0.connect(PC_IC.cet, ZERO)
+    # PC_IC.tc
+    # SP
+    plate_0.connect(SP_IC.input, WIDE)
+    plate_0.connect(SP_IC.output, SP)
+    plate_0.connect(SP_IC.reset, ZERO)
+    plate_0.connect(SP_IC.n_ie, SP_IN)
+    plate_0.connect(SP_IC.cpu, ONE)
+    plate_0.connect(SP_IC.cpd, ONE)
+    # SP_IC.n_tcu
+    # SP_IC.n_tcd
+    # MAR0
+    plate_0.connect(MAR0.input, ALU)
+    # MAR0.output
+    plate_0.connect(MAR0.n_ie, MAR_IN_DECODER.output_0)
+    plate_0.connect(MAR0.n_oe, ZERO)
+    plate_0.connect(MAR0.reset, ZERO)
+    plate_0.connect(MAR0.clock, CLOCK)
+    # MAR1
+    plate_0.connect(MAR1.input, ALU)
+    # MAR1.output
+    plate_0.connect(MAR1.n_ie, MAR_IN_DECODER.output_1)
+    plate_0.connect(MAR1.n_oe, ZERO)
+    plate_0.connect(MAR1.reset, ZERO)
+    plate_0.connect(MAR1.clock, CLOCK)
+    # MAR2
+    plate_0.connect(MAR2.input, ALU)
+    # MAR2.output
+    plate_0.connect(MAR2.n_ie, MAR_IN_DECODER.output_2)
+    plate_0.connect(MAR2.n_oe, ZERO)
+    plate_0.connect(MAR2.reset, ZERO)
+    plate_0.connect(MAR2.clock, CLOCK)
+    # MAR_IN_DECODER
+    plate_0.connect(MAR_IN_DECODER.input, MAR_IN)
+    # MAR_IN_DECODER.output_0
+    # MAR_IN_DECODER.output_1
+    # MAR_IN_DECODER.output_2
+    # MAR_IN_DECODER.output_3
+    plate_0.connect(MAR_IN_DECODER.n_ie, ZERO)
+    # MAR012_2_MAR
+    plate_0.connect(MAR012_2_MAR.narrows[0], MAR0.output)
+    plate_0.connect(MAR012_2_MAR.narrows[1], MAR1.output)
+    plate_0.connect(MAR012_2_MAR.narrows[2], MAR2.output)
+    plate_0.connect(MAR012_2_MAR.wide, MAR)
+    # PC_2_WIDE
+    plate_0.connect(PC_2_WIDE.n_oe, PC_OUT)
+    plate_0.connect(PC_2_WIDE.input, PC)
+    plate_0.connect(PC_2_WIDE.output, WIDE)
+    # SP_2_WIDE
+    plate_0.connect(SP_2_WIDE.n_oe, SP_OUT)
+    plate_0.connect(SP_2_WIDE.input, SP)
+    plate_0.connect(SP_2_WIDE.output, WIDE)
+    # MAR_2_WIDE
+    plate_0.connect(MAR_2_WIDE.n_oe, MAR_OUT)
+    plate_0.connect(MAR_2_WIDE.input, MAR)
+    plate_0.connect(MAR_2_WIDE.output, WIDE)
+    # WIDE_2_ADDR
+    plate_0.connect(WIDE_2_ADDR.n_oe, WIDE_OUT)
+    plate_0.connect(WIDE_2_ADDR.input, WIDE)
+    plate_0.connect(WIDE_2_ADDR.output, ADDR)
+    
+    elements = [ PC, SP, MAR, ALU, WIDE, ADDR ]
+    # elements = [ ALU, MAR0.input, MAR1.input, MAR2.input, MAR012_2_MAR.narrows, MAR012_2_MAR.wide, MAR]
     print(elements)
 
     def setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, xCLOCK):
-        MAR_IN.OUT(value(xMAR_IN))
+        MAR_IN.OUT(value(*xMAR_IN))
         MAR_OUT.OUT(value(xMAR_OUT))
         PC_IN.OUT(value(xPC_IN))
         PC_OUT.OUT(value(xPC_OUT))
@@ -728,36 +855,40 @@ def main():
         SP_OUT.OUT(value(xSP_OUT))
         WIDE_OUT.OUT(value(xWIDE_OUT))
         CLOCK.OUT(value(xCLOCK))
-    # 0101 > MAR
+    def execute(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT):
+        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, 0)
+        step(plate_0)
+        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, 1)
+        step(plate_0)
+    # 011011 > MAR
     print()
-    WIDE.OUT(value(0, 1, 0, 1))
-    setup(0, 1, 1, 1, 1, 1, 1, 0)
-    step(plate_0)
-    setup(0, 1, 1, 1, 1, 1, 1, 1)
-    step(plate_0)
+    print('011011 > MAR')
+    ALU.OUT(value(0, 1))
+    execute([0, 0], 1, 1, 1, 1, 1, 1)
     print(elements)
-    # 1111 > PC, SP
+    ALU.OUT(value(1, 0))
+    execute([0, 1], 1, 1, 1, 1, 1, 1)
+    print(elements)
+    ALU.OUT(value(1, 1))
+    execute([1, 0], 1, 1, 1, 1, 1, 1)
+    print(elements)
+    ALU.IN()
+    # 111111 > PC, SP
     print()
-    WIDE.OUT(value(1, 1, 1, 1))
-    setup(1, 1, 0, 1, 0, 1, 1, 0)
-    step(plate_0)
-    setup(1, 1, 0, 1, 0, 1, 1, 1)
-    step(plate_0)
+    print('111111 > PC, SP')
+    WIDE.OUT(value(1, 1, 1, 1, 1, 1))
+    execute([1, 1], 1, 0, 1, 0, 1, 1)
     print(elements)
+    WIDE.IN()
     # MAR > PC, ADDR
     print()
-    WIDE.IN()
-    setup(1, 0, 0, 1, 1, 1, 0, 0)
-    step(plate_0)
-    setup(1, 0, 0, 1, 1, 1, 0, 1)
-    step(plate_0)
+    print('MAR > PC, ADDR')
+    execute([1, 1], 0, 0, 1, 1, 1, 0)
     print(elements)
     # SP > ADDR
     print()
-    setup(1, 1, 1, 1, 1, 0, 0, 0)
-    step(plate_0)
-    setup(1, 1, 1, 1, 1, 0, 0, 1)
-    step(plate_0)
+    print('SP > ADDR')
+    execute([1, 1], 1, 1, 1, 1, 0, 0)
     print(elements)
 
 
@@ -1366,6 +1497,53 @@ class Test_Counter_193(unittest.TestCase):
                                 self.assertTrue(counter.n_tcd.is_low())
                         else:
                             self.assertTrue(counter.n_tcd.is_high())
+
+class Test_Decoder_139(unittest.TestCase):
+    def test_full_139(self):
+        def make(input, n_ie):
+            decoder = Decoder_139()
+            decoder.input.set(input)
+            decoder.n_ie.set(n_ie)
+            return decoder
+
+        if not FULL_TESTS: return
+        width = 2
+        # Disabled
+        n_ie = value_high()
+        for input in test_inputs(width):
+            decoder = make(input, n_ie)
+            decoder.generate()
+            self.assertEqual(decoder.output_0.get(), value_high())
+            self.assertEqual(decoder.output_1.get(), value_high())
+            self.assertEqual(decoder.output_2.get(), value_high())
+            self.assertEqual(decoder.output_3.get(), value_high())
+        # Decode
+        n_ie = value_low()
+        decoder = make(value(LO, LO), n_ie)
+        decoder.generate()
+        self.assertEqual(decoder.output_0.get(), value_low())
+        self.assertEqual(decoder.output_1.get(), value_high())
+        self.assertEqual(decoder.output_2.get(), value_high())
+        self.assertEqual(decoder.output_3.get(), value_high())
+        decoder = make(value(LO, HI), n_ie)
+        decoder.generate()
+        self.assertEqual(decoder.output_0.get(), value_high())
+        self.assertEqual(decoder.output_1.get(), value_low())
+        self.assertEqual(decoder.output_2.get(), value_high())
+        self.assertEqual(decoder.output_3.get(), value_high())
+        decoder = make(value(HI, LO), n_ie)
+        decoder.generate()
+        self.assertEqual(decoder.output_0.get(), value_high())
+        self.assertEqual(decoder.output_1.get(), value_high())
+        self.assertEqual(decoder.output_2.get(), value_low())
+        self.assertEqual(decoder.output_3.get(), value_high())
+        decoder = make(value(HI, HI), n_ie)
+        decoder.generate()
+        self.assertEqual(decoder.output_0.get(), value_high())
+        self.assertEqual(decoder.output_1.get(), value_high())
+        self.assertEqual(decoder.output_2.get(), value_high())
+        self.assertEqual(decoder.output_3.get(), value_low())
+
 
 if __name__ == "__main__":
     # unittest.main()
