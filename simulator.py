@@ -2,8 +2,6 @@ from collections import namedtuple
 from collections import defaultdict
 import itertools
 
-FULL_TESTS = True
-
 elements = set()
 
 IN = 'in'
@@ -47,7 +45,7 @@ def value_to_int(value):
 
 def int_to_value(n, width):
     n = n % 2**width
-    n = '{:04b}'.format(n)
+    n = '{:0{}b}'.format(n, width)
     n = [ int(x) for x in n ]
     return value(*n)
 
@@ -372,7 +370,7 @@ class Counter_161(FixedWidthComponent):
     def generate(self):
         self.tc.OUT(value_low())
         if self.n_reset.is_low():
-            self.output.OUT(value_low(4))
+            self.output.OUT(value_low(self.width))
         else:
             if self.n_ie.is_low():
                 if self.clock.triggered():
@@ -440,31 +438,48 @@ class Counter_193(FixedWidthComponent):
         self.cpu.tick()
         self.cpd.tick()
 
-class Decoder_139(Component):
-    def __init__(self, name=None):
-        super().__init__(name)
-        self.input = WidePoint(self._subname('input'), 2).IN()
-        self.output_0 = SignalPoint(self._subname('output_0')).OUT(value_floating())
-        self.output_1 = SignalPoint(self._subname('output_1')).OUT(value_floating())
-        self.output_2 = SignalPoint(self._subname('output_2')).OUT(value_floating())
-        self.output_3 = SignalPoint(self._subname('output_3')).OUT(value_floating())
-        self.n_ie = SignalPoint(self._subname('n_ie')).IN()
+class Decoder_139(FixedWidthComponent):
+    def __init__(self, width, name=None):
+        super().__init__(width, name)
+        self.input = WidePoint(self._subname('input'), width).IN()
+        self.outputs = [
+            SignalPoint(self._subname('output_{}'.format(n))).OUT(value_floating())
+            for n in range(2**self.width)
+        ]
+        self.n_ie = SignalPoint(self._subname('/ie')).IN()
     
     def generate(self):
-        self.output_0.OUT(value_high())
-        self.output_1.OUT(value_high())
-        self.output_2.OUT(value_high())
-        self.output_3.OUT(value_high())
+        for output in self.outputs:
+            output.OUT(value_high())
         if self.n_ie.is_low():
             n = value_to_int(self.input.get())
-            if n == 0:
-                self.output_0.OUT(value_low())
-            elif n == 1:
-                self.output_1.OUT(value_low())
-            elif n == 2:
-                self.output_2.OUT(value_low())
-            elif n == 3:
-                self.output_3.OUT(value_low())
+            self.outputs[n].OUT(value_low())
+
+class ROM_28C256(FixedWidthComponent):
+    def __init__(self, data_width, address_width, name=None):
+        super().__init__(data_width, name)
+        self.address_width = address_width
+        self.address = WidePoint(self._subname('address'), self.address_width).IN()
+        self.data = WidePoint(self._subname('data'), self.width).HiZ()
+        self.n_ce = SignalPoint(self._subname('/ce')).IN()
+        self.n_oe = SignalPoint(self._subname('/oe')).IN()
+        self._content = [0] * 2**self.address_width
+    
+    def set_content(self, content):
+        assert len(content) == 2**self.address_width
+        for value in content:
+            assert 0 <= value < 2**self.width
+        self._content = content
+        return self
+    
+    def generate(self):
+        if self.n_ce.is_high() or self.n_oe.is_high():
+            self.data.HiZ()
+        else:
+            index = value_to_int(self.address.get())
+            data = self._content[index]
+            data_value = int_to_value(data, self.width)
+            self.data.OUT(data_value)
 
 ################################################################################
 
@@ -523,10 +538,14 @@ class HookPoint(WidePoint):
         return self
 
 class Splitter(Component):
-    def __init__(self, *widths):
+    def __init__(self, *widths, name=None):
+        super().__init__(name)
         wide_width = sum(widths)
-        self.narrows = [ HookPoint('', width, self.narrow_2_wide) for width in widths ]
-        self.wide = HookPoint('', wide_width, self.wide_to_narrow)
+        self.narrows = [
+            HookPoint(self._subname('narrow_{}'.format(n)), width, self.narrow_2_wide)
+            for n, width in enumerate(widths)
+        ]
+        self.wide = HookPoint(self._subname('wide'), wide_width, self.wide_to_narrow)
     
     def narrow_2_wide(self):
         wide_value = []
@@ -575,11 +594,20 @@ def propagation(wiring):
         neighbours = { point }
         neighbours |= wiring.neighbours(point)
         points -= neighbours
-        values = [ p.get() for p in neighbours if p.direction == OUT ]
-        v = util_resolve_values(values)
-        # print(neighbours, values, v)
-        for p in neighbours:
-            p.set(v)
+        drivers = [ p for p in neighbours if p.direction == OUT ]
+        if len(drivers) == 0:
+            for p in neighbours:
+                p.set(value_floating())
+        elif len(drivers) == 1:
+            driver = drivers[0]
+            value = driver.get()
+            for p in neighbours:
+                if p != driver:
+                    p.set(value)
+        else:
+            for p in neighbours:
+                p.set(value_conflict())
+        # print(neighbours, drivers)
 
 def iteration(component):
     wiring = Wiring()
@@ -594,7 +622,7 @@ def iteration(component):
     after = signature(points)
     return after == before
 
-def step(circuit, *, limit=10):
+def step(circuit, *, limit=100):
     assert isinstance(circuit, Circuit)
     n = 0
     while not iteration(circuit) and n < limit:
@@ -747,8 +775,11 @@ def main():
     MAR_OUT = SignalPoint('MAR_OUT')
     PC_IN = SignalPoint('PC_IN')
     PC_OUT = SignalPoint('PC_OUT')
+    PC_UP = SignalPoint('PC_UP')
     SP_IN = SignalPoint('SP_IN')
     SP_OUT = SignalPoint('SP_OUT')
+    SP_UP = SignalPoint('SP_UP')
+    SP_DOWN = SignalPoint('SP_DOWN')
     WIDE_OUT = SignalPoint('WIDE_OUT')
     CLOCK = SignalPoint('CLOCK')
     # Plate
@@ -758,8 +789,8 @@ def main():
     MAR0 = Register_173(2, 'MAR0')
     MAR1 = Register_173(2, 'MAR1')
     MAR2 = Register_173(2, 'MAR2')
-    MAR_IN_DECODER = Decoder_139('MAR_IN_DECODER')
-    MAR012_2_MAR = Splitter(2, 2, 2)
+    MAR_IN_DECODER = Decoder_139(2, 'MAR_IN_DECODER')
+    MAR012_2_MAR = Splitter(2, 2, 2, name='MAR012_2_MAR')
     PC_2_WIDE = Buffer_541(6, 'PC_2_WIDE')
     SP_2_WIDE = Buffer_541(6, 'SP_2_WIDE')
     MAR_2_WIDE = Buffer_541(6, 'MAR_2_WIDE')
@@ -780,36 +811,36 @@ def main():
     plate_0.connect(PC_IC.n_reset, ONE)
     plate_0.connect(PC_IC.clock, CLOCK)
     plate_0.connect(PC_IC.n_ie, PC_IN)
-    plate_0.connect(PC_IC.cep, ZERO)
-    plate_0.connect(PC_IC.cet, ZERO)
+    plate_0.connect(PC_IC.cep, PC_UP)
+    plate_0.connect(PC_IC.cet, PC_UP)
     # PC_IC.tc
     # SP
     plate_0.connect(SP_IC.input, WIDE)
     plate_0.connect(SP_IC.output, SP)
     plate_0.connect(SP_IC.reset, ZERO)
     plate_0.connect(SP_IC.n_ie, SP_IN)
-    plate_0.connect(SP_IC.cpu, ONE)
-    plate_0.connect(SP_IC.cpd, ONE)
+    plate_0.connect(SP_IC.cpu, SP_UP)
+    plate_0.connect(SP_IC.cpd, SP_DOWN)
     # SP_IC.n_tcu
     # SP_IC.n_tcd
     # MAR0
     plate_0.connect(MAR0.input, ALU)
     # MAR0.output
-    plate_0.connect(MAR0.n_ie, MAR_IN_DECODER.output_0)
+    plate_0.connect(MAR0.n_ie, MAR_IN_DECODER.outputs[0])
     plate_0.connect(MAR0.n_oe, ZERO)
     plate_0.connect(MAR0.reset, ZERO)
     plate_0.connect(MAR0.clock, CLOCK)
     # MAR1
     plate_0.connect(MAR1.input, ALU)
     # MAR1.output
-    plate_0.connect(MAR1.n_ie, MAR_IN_DECODER.output_1)
+    plate_0.connect(MAR1.n_ie, MAR_IN_DECODER.outputs[1])
     plate_0.connect(MAR1.n_oe, ZERO)
     plate_0.connect(MAR1.reset, ZERO)
     plate_0.connect(MAR1.clock, CLOCK)
     # MAR2
     plate_0.connect(MAR2.input, ALU)
     # MAR2.output
-    plate_0.connect(MAR2.n_ie, MAR_IN_DECODER.output_2)
+    plate_0.connect(MAR2.n_ie, MAR_IN_DECODER.outputs[2])
     plate_0.connect(MAR2.n_oe, ZERO)
     plate_0.connect(MAR2.reset, ZERO)
     plate_0.connect(MAR2.clock, CLOCK)
@@ -846,51 +877,140 @@ def main():
     # elements = [ ALU, MAR0.input, MAR1.input, MAR2.input, MAR012_2_MAR.narrows, MAR012_2_MAR.wide, MAR]
     print(elements)
 
-    def setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, xCLOCK):
+    def setup(xMAR_IN, xMAR_OUT,
+        xPC_IN, xPC_OUT, xPC_UP,
+        xSP_IN, xSP_OUT, xSP_UP, xSP_DOWN,
+        xWIDE_OUT, xCLOCK):
         MAR_IN.OUT(value(*xMAR_IN))
         MAR_OUT.OUT(value(xMAR_OUT))
         PC_IN.OUT(value(xPC_IN))
         PC_OUT.OUT(value(xPC_OUT))
+        PC_UP.OUT(value(xPC_UP))
         SP_IN.OUT(value(xSP_IN))
         SP_OUT.OUT(value(xSP_OUT))
+        SP_UP.OUT(value(xSP_UP))
+        SP_DOWN.OUT(value(xSP_DOWN))
         WIDE_OUT.OUT(value(xWIDE_OUT))
         CLOCK.OUT(value(xCLOCK))
-    def execute(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT):
-        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, 0)
+    def execute(xMAR_IN, xMAR_OUT,
+        xPC_IN, xPC_OUT, xPC_UP,
+        xSP_IN, xSP_OUT, xSP_UP, xSP_DOWN,
+        xWIDE_OUT):
+        # print(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xPC_UP, xSP_IN, xSP_OUT, xSP_UP, xSP_DOWN, xWIDE_OUT)
+        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xPC_UP, xSP_IN, xSP_OUT, xSP_UP, xSP_DOWN, xWIDE_OUT, 0)
         step(plate_0)
-        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xSP_IN, xSP_OUT, xWIDE_OUT, 1)
+        setup(xMAR_IN, xMAR_OUT, xPC_IN, xPC_OUT, xPC_UP, xSP_IN, xSP_OUT, xSP_UP, xSP_DOWN, xWIDE_OUT, 1)
         step(plate_0)
     # 011011 > MAR
     print()
     print('011011 > MAR')
     ALU.OUT(value(0, 1))
-    execute([0, 0], 1, 1, 1, 1, 1, 1)
+    execute([0, 0], 1, 1, 1, 0, 1, 1, 1, 1, 1)
     print(elements)
     ALU.OUT(value(1, 0))
-    execute([0, 1], 1, 1, 1, 1, 1, 1)
+    execute([0, 1], 1, 1, 1, 0, 1, 1, 1, 1, 1)
     print(elements)
     ALU.OUT(value(1, 1))
-    execute([1, 0], 1, 1, 1, 1, 1, 1)
+    execute([1, 0], 1, 1, 1, 0, 1, 1, 1, 1, 1)
     print(elements)
     ALU.IN()
     # 111111 > PC, SP
     print()
     print('111111 > PC, SP')
     WIDE.OUT(value(1, 1, 1, 1, 1, 1))
-    execute([1, 1], 1, 0, 1, 0, 1, 1)
+    execute([1, 1], 1, 0, 1, 0, 0, 1, 1, 1, 1)
     print(elements)
     WIDE.IN()
+    # ++PC
+    print('++PC')
+    execute([1, 1], 1, 1, 1, 1, 1, 1, 1, 1, 0)
+    print(elements)
+    # --SP
+    print('--SP')
+    execute([1, 1], 1, 1, 1, 0, 1, 1, 1, 0, 0)
+    print(elements)
+    execute([1, 1], 1, 1, 1, 0, 1, 1, 1, 1, 0)
+    print(elements)
     # MAR > PC, ADDR
     print()
     print('MAR > PC, ADDR')
-    execute([1, 1], 0, 0, 1, 1, 1, 0)
+    execute([1, 1], 0, 0, 1, 0, 1, 1, 1, 1, 0)
     print(elements)
     # SP > ADDR
     print()
     print('SP > ADDR')
-    execute([1, 1], 1, 1, 1, 1, 0, 0)
+    execute([1, 1], 1, 1, 1, 0, 1, 0, 1, 1, 0)
     print(elements)
 
+    # MAR_IN, MAR_OUT
+    # PC_IN, PC_OUT, PC_UP
+    # SP_IN, SP_OUT, SP_UP, SP_DOWN
+    # WIDE_OUT
+    oNOP = {
+        MAR_IN: [1, 1], MAR_OUT: 1,
+        PC_IN: 1, PC_OUT: 1, PC_UP: 0,
+        SP_IN: 1, SP_OUT: 1, SP_UP: 1, SP_DOWN: 1,
+        WIDE_OUT: 1
+    }
+    oMAR0_IN = { MAR_IN: [0, 0] }
+    oMAR1_IN = { MAR_IN: [0, 1] }
+    oMAR2_IN = { MAR_IN: [1, 0] }
+    oMAR_OUT = { MAR_OUT: 0, PC_OUT: 1, SP_OUT: 1 }
+    oPC_IN = { PC_IN: 0 }
+    oPC_OUT = { MAR_OUT: 1, PC_OUT: 0, SP_OUT: 1 }
+    oPC_UP = { PC_IN: 1, PC_UP: 1 }
+    oSP_IN = { SP_IN: 0 }
+    oSP_OUT = { MAR_OUT: 1, PC_OUT: 1, SP_OUT: 0 }
+    oSP_UP = { SP_IN: 1, SP_UP: 0, SP_DOWN: 1 }
+    oSP_DOWN = { SP_IN: 1, SP_UP: 1, SP_DOWN: 0 }
+    oWIDE_OUT = { WIDE_OUT: 0 }
+    def micro_op(*commands):
+        uops = {}
+        for command in commands:
+            assert len(uops.keys() & command.keys()) == 0
+            uops.update(command)
+        uop = oNOP.copy()
+        uop.update(uops)
+        return (
+            uop[MAR_IN], uop[MAR_OUT],
+            uop[PC_IN], uop[PC_OUT], uop[PC_UP],
+            uop[SP_IN], uop[SP_OUT], uop[SP_UP], uop[SP_DOWN],
+            uop[WIDE_OUT]
+            )
+
+    print()
+    print('000000 > MAR')
+    ALU.OUT(value(0, 0))
+    execute(*micro_op(oMAR0_IN))
+    print(elements)
+    execute(*micro_op(oMAR1_IN))
+    print(elements)
+    execute(*micro_op(oMAR2_IN))
+    print(elements)
+    ALU.IN()
+    print()
+    print('MAR > PC, SP')
+    execute(*micro_op(oMAR_OUT, oPC_IN, oSP_IN))
+    print(elements)
+    print('++PC')
+    execute(*micro_op(oPC_UP))
+    print(elements)
+    print('--SP')
+    execute(*micro_op(oSP_DOWN))
+    print(elements)
+    execute(*micro_op(oNOP))
+    print(elements)
+    print()
+    print('MAR > PC, ADDR')
+    execute(*micro_op(oMAR_OUT, oPC_IN, oWIDE_OUT))
+    print(elements)
+    print()
+    print('SP > ADDR')
+    execute(*micro_op(oSP_OUT, oWIDE_OUT))
+    print(elements)
+
+    # Plate 1
+    plate_1 = Circuit('Plate 1')
 
 ################################################################################
 
@@ -998,58 +1118,6 @@ class Test_And(unittest.TestCase):
             self.assertEqual(e.output.get(), value(r0, r1))
 
 class Test_Register_173(unittest.TestCase):
-    def test_173(self):
-        reg = Register_173(4)
-        reg.clock.set(value_low())
-        reg.generate()
-        
-        x0 = reg.output.get()
-
-        # Load on clock
-        # Load 0101
-        x = value(LO, HI, LO, HI)
-        reg.input.set(x)
-        reg.n_ie.set(value_low())
-        reg.n_oe.set(value_low())
-        reg.reset.set(value_low())
-        reg.clock.set(value_low())
-        reg.generate()
-        self.assertEqual(reg.output.get(), x0)
-        
-        reg.clock.set(value_high())
-        reg.generate()
-        self.assertEqual(reg.output.get(), x)
-        
-        # Load 1010
-        x = value(HI, LO, HI, LO)
-        reg.input.set(x)
-        reg.clock.set(value_low())
-        reg.generate()
-        reg.clock.set(value_high())
-        reg.generate()
-        self.assertEqual(reg.output.get(), x)
-        
-        # Hold
-        x0 = x
-        x = value_low(4)
-        reg.input.set(x)
-        reg.n_ie.set(value_high())
-        reg.clock.set(value_low())
-        reg.generate()
-        reg.clock.set(value_high())
-        reg.generate()
-        self.assertEqual(reg.output.get(), x0)
-        
-        # Reset
-        reg.reset.set(value_high())
-        reg.generate()
-        self.assertEqual(reg.output.get(), value_low(4))
-        
-        # Disable
-        reg.n_oe.set(value_high())
-        reg.generate()
-        self.assertEqual(reg.output.get(), value_hi_z(4))
-    
     def test_full_173(self):
         def make(input, n_ie, n_oe, reset, clock):
             width = len(input)
@@ -1061,7 +1129,6 @@ class Test_Register_173(unittest.TestCase):
             register.clock._test_set(clock)
             return register
         
-        if not FULL_TESTS: return
         width = 4
         # Output enabled
         n_oe = value_high()
@@ -1107,24 +1174,6 @@ class Test_Register_173(unittest.TestCase):
                 self.assertEqual(register.output.get(), x0)
 
 class Test_Buffer_541(unittest.TestCase):
-    def test_541(self):
-        buf = Buffer_541(4)
-        buf.n_oe.set(value_low())
-        # Drive 0101
-        x = value(LO, HI, LO, HI)
-        buf.input.set(x)
-        buf.generate()
-        self.assertEqual(buf.output.get(), x)
-        # Drive 1010
-        x = value(HI, LO, HI, LO)
-        buf.input.set(x)
-        buf.generate()
-        self.assertEqual(buf.output.get(), x)
-        # Disable
-        buf.n_oe.set(value_high())
-        buf.generate()
-        self.assertEqual(buf.output.get(), value_hi_z(4))
-    
     def test_full_541(self):
         def make(input, n_oe):
             width = len(input)
@@ -1133,7 +1182,6 @@ class Test_Buffer_541(unittest.TestCase):
             buffer.n_oe.set(n_oe)
             return buffer
         
-        if not FULL_TESTS: return
         width = 4
         # Output enabled
         for input in test_inputs(width):
@@ -1148,119 +1196,6 @@ class Test_Buffer_541(unittest.TestCase):
 
 
 class Test_Counter_161(unittest.TestCase):
-    def test_161(self):
-        def counter():
-            cnt = Counter_161(4)
-            cnt.n_reset.set(value_high())
-            cnt.clock.set(value_low())
-            cnt.cep.set(value_low())
-            cnt.cet.set(value_low())
-            cnt.n_ie.set(value_high())
-            return cnt
-        def clock(counter):
-            counter.clock.set(value_low())
-            counter.generate()
-            counter.clock.set(value_high())
-            counter.generate()
-        # Load on clock
-        # Load 0101
-        cnt = counter()
-        x0 = cnt.output.get()
-        assert x0 == value_floating(4)
-        x = value(LO, HI, LO, HI)
-        cnt.input.set(x)
-        cnt.n_ie.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), x0)
-        cnt.clock.set(value_high())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), x)
-        # Load 1010
-        cnt = counter()
-        x = value(HI, LO, HI, LO)
-        cnt.input.set(x)
-        cnt.n_ie.set(value_low())
-        clock(cnt)
-        self.assertEqual(cnt.output.get(), x)
-        # Reset
-        cnt = counter()
-        cnt.n_reset.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value_low(4))
-        # Load 1111, CET 0 => TC 0
-        cnt = counter()
-        cnt.input.set(value_high(4))
-        cnt.n_ie.set(value_low())
-        clock(cnt)
-        self.assertTrue(cnt.tc.is_low())
-        # Load 1111, CET 1 => TC 1
-        cnt = counter()
-        cnt.input.set(value_high(4))
-        cnt.n_ie.set(value_low())
-        cnt.cet.set(value_high())
-        clock(cnt)
-        self.assertTrue(cnt.tc.is_high())
-        # Load 1110, count, 1111 => TC 1, loop to 0
-        cnt = counter()
-        cnt.input.set(value(HI, HI, HI, LO))
-        cnt.n_ie.set(value_low())
-        clock(cnt)
-        cnt.n_ie.set(value_high())
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
-        self.assertTrue(cnt.tc.is_low())
-        cnt.cep.set(value_high())
-        cnt.cet.set(value_high())
-        clock(cnt)
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
-        self.assertTrue(cnt.tc.is_high())
-        clock(cnt)
-        self.assertEqual(cnt.output.get(), value(LO, LO, LO, LO))
-        self.assertTrue(cnt.tc.is_low())
-        # Hold 1110, hold CET 0, CEP 1 => TC 0, hold CET 1, CEP 0 => TC 0
-        cnt = counter()
-        cnt.input.set(value(HI, HI, HI, LO))
-        cnt.n_ie.set(value_low())
-        clock(cnt)
-        cnt.n_ie.set(value_high())
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
-        cnt.cep.set(value_low())
-        cnt.cet.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
-        self.assertTrue(cnt.tc.is_low())
-        cnt.cep.set(value_high())
-        cnt.cet.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
-        self.assertTrue(cnt.tc.is_low())
-        cnt.cep.set(value_low())
-        cnt.cet.set(value_high())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, LO))
-        self.assertTrue(cnt.tc.is_low())
-        # Hold 1111, hold CET 0, CEP 1 => TC 0, hold CET 1, CEP 0 => TC 0
-        cnt = counter()
-        cnt.input.set(value(HI, HI, HI, HI))
-        cnt.n_ie.set(value_low())
-        clock(cnt)
-        cnt.n_ie.set(value_high())
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
-        cnt.cep.set(value_low())
-        cnt.cet.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
-        self.assertTrue(cnt.tc.is_low())
-        cnt.cep.set(value_high())
-        cnt.cet.set(value_low())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
-        self.assertTrue(cnt.tc.is_low())
-        cnt.cep.set(value_low())
-        cnt.cet.set(value_high())
-        cnt.generate()
-        self.assertEqual(cnt.output.get(), value(HI, HI, HI, HI))
-        self.assertTrue(cnt.tc.is_high())
-    
     def test_full_161(self):
         def set(counter, n_ie, n_reset, cep, cet, clock):
             counter.n_ie.set(n_ie)
@@ -1276,7 +1211,6 @@ class Test_Counter_161(unittest.TestCase):
             counter.input.set(input)
             return set(counter, n_ie, n_reset, cep, cet, clock)
 
-        if not FULL_TESTS: return
         width = 4
         # Reset
         n_reset = value_low()
@@ -1382,7 +1316,6 @@ class Test_Counter_193(unittest.TestCase):
             counter.input.set(input)
             return setup(counter, n_ie, reset, cpu, cpd)
         
-        if not FULL_TESTS: return
         width = 4
         # Reset, CPD 0
         reset = value_high()
@@ -1501,51 +1434,107 @@ class Test_Counter_193(unittest.TestCase):
 class Test_Decoder_139(unittest.TestCase):
     def test_full_139(self):
         def make(input, n_ie):
-            decoder = Decoder_139()
+            decoder = Decoder_139(2)
             decoder.input.set(input)
             decoder.n_ie.set(n_ie)
             return decoder
 
-        if not FULL_TESTS: return
         width = 2
         # Disabled
         n_ie = value_high()
         for input in test_inputs(width):
             decoder = make(input, n_ie)
             decoder.generate()
-            self.assertEqual(decoder.output_0.get(), value_high())
-            self.assertEqual(decoder.output_1.get(), value_high())
-            self.assertEqual(decoder.output_2.get(), value_high())
-            self.assertEqual(decoder.output_3.get(), value_high())
+            self.assertEqual(decoder.outputs[0].get(), value_high())
+            self.assertEqual(decoder.outputs[1].get(), value_high())
+            self.assertEqual(decoder.outputs[2].get(), value_high())
+            self.assertEqual(decoder.outputs[3].get(), value_high())
         # Decode
         n_ie = value_low()
         decoder = make(value(LO, LO), n_ie)
         decoder.generate()
-        self.assertEqual(decoder.output_0.get(), value_low())
-        self.assertEqual(decoder.output_1.get(), value_high())
-        self.assertEqual(decoder.output_2.get(), value_high())
-        self.assertEqual(decoder.output_3.get(), value_high())
+        self.assertEqual(decoder.outputs[0].get(), value_low())
+        self.assertEqual(decoder.outputs[1].get(), value_high())
+        self.assertEqual(decoder.outputs[2].get(), value_high())
+        self.assertEqual(decoder.outputs[3].get(), value_high())
         decoder = make(value(LO, HI), n_ie)
         decoder.generate()
-        self.assertEqual(decoder.output_0.get(), value_high())
-        self.assertEqual(decoder.output_1.get(), value_low())
-        self.assertEqual(decoder.output_2.get(), value_high())
-        self.assertEqual(decoder.output_3.get(), value_high())
+        self.assertEqual(decoder.outputs[0].get(), value_high())
+        self.assertEqual(decoder.outputs[1].get(), value_low())
+        self.assertEqual(decoder.outputs[2].get(), value_high())
+        self.assertEqual(decoder.outputs[3].get(), value_high())
         decoder = make(value(HI, LO), n_ie)
         decoder.generate()
-        self.assertEqual(decoder.output_0.get(), value_high())
-        self.assertEqual(decoder.output_1.get(), value_high())
-        self.assertEqual(decoder.output_2.get(), value_low())
-        self.assertEqual(decoder.output_3.get(), value_high())
+        self.assertEqual(decoder.outputs[0].get(), value_high())
+        self.assertEqual(decoder.outputs[1].get(), value_high())
+        self.assertEqual(decoder.outputs[2].get(), value_low())
+        self.assertEqual(decoder.outputs[3].get(), value_high())
         decoder = make(value(HI, HI), n_ie)
         decoder.generate()
-        self.assertEqual(decoder.output_0.get(), value_high())
-        self.assertEqual(decoder.output_1.get(), value_high())
-        self.assertEqual(decoder.output_2.get(), value_high())
-        self.assertEqual(decoder.output_3.get(), value_low())
+        self.assertEqual(decoder.outputs[0].get(), value_high())
+        self.assertEqual(decoder.outputs[1].get(), value_high())
+        self.assertEqual(decoder.outputs[2].get(), value_high())
+        self.assertEqual(decoder.outputs[3].get(), value_low())
 
+class Test_ROM_28C256(unittest.TestCase):
+    def test_full_28c256(self):
+        def make(width, address, n_ce, n_oe):
+            address_width = len(address)
+            rom = ROM_28C256(width, address_width)
+            rom_content = [ n % 2**width for n in range(2**address_width) ]
+            rom.set_content(rom_content)
+            rom.address.set(address)
+            rom.n_ce.set(n_ce)
+            rom.n_oe.set(n_oe)
+            return rom
+        
+        width = 4
+        address_width = 8
+        # Output disabled
+        n_oe = value_high()
+        for address in test_inputs(address_width):
+            for n_ce in test_signals():
+                rom = make(width, address, n_ce, n_oe)
+                rom.generate()
+                self.assertEqual(rom.data.get(), value_hi_z(width))
+        # Chip disabled
+        n_ce = value_high()
+        for address in test_inputs(address_width):
+            for n_oe in test_signals():
+                rom = make(width, address, n_ce, n_oe)
+                rom.generate()
+                self.assertEqual(rom.data.get(), value_hi_z(width))
+        # Read
+        n_ce = value_low()
+        n_oe = value_low()
+        for address in test_inputs(address_width):
+            rom = make(width, address, n_ce, n_oe)
+            rom.generate()
+            expected = int_to_value(value_to_int(address), width)
+            self.assertEqual(rom.data.get(), expected)
+    
+    def test_set_content(self):
+        rom = ROM_28C256(4, 4)
+
+        correct_content = [ n for n in range(16) ]
+        # Don't raise exception
+        rom.set_content(correct_content)
+
+        too_short = correct_content[:-1]
+        self.assertRaises(AssertionError, rom.set_content, too_short)
+
+        too_long = correct_content + [0]
+        self.assertRaises(AssertionError, rom.set_content, too_long)
+
+        too_big = correct_content
+        too_big[0] = 16
+        self.assertRaises(AssertionError, rom.set_content, too_big)
 
 if __name__ == "__main__":
-    # unittest.main()
-    main()
+    import sys
+    if 'test' in sys.argv:
+        sys.argv.remove('test')
+        unittest.main()
+    else:
+        main()
 
